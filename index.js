@@ -21,10 +21,148 @@ mongoose
   .connect(MONGODB_URI)
   .then(() => {
     console.log("connected to MongoDB");
+    // checkDatabase3();
+    // checkAuthorsExistence();
+    // fixBooks();
   })
   .catch((error) => {
     console.log("error connection to MongoDB:", error.message);
   });
+
+async function checkDatabase() {
+  try {
+    // Find all books and populate author details
+    const books = await Book.find({}).populate("author");
+    console.log("All books:", JSON.stringify(books, null, 2));
+
+    // Find all authors
+    const authors = await Author.find({});
+    console.log("All authors:", JSON.stringify(authors, null, 2));
+
+    // Find books with missing authors
+    const booksWithoutAuthors = await Book.find({ author: null });
+    console.log(
+      "Books without authors:",
+      JSON.stringify(booksWithoutAuthors, null, 2)
+    );
+
+    const defaultAuthor = await Author.findOne();
+    await Book.updateMany(
+      { author: null },
+      { $set: { author: defaultAuthor._id } }
+    );
+  } catch (error) {
+    console.error("Error:", error);
+  }
+}
+
+async function checkDatabase2() {
+  try {
+    // Check for null, undefined, missing, or invalid ObjectId
+    const problematicBooks = await Book.find({
+      $or: [
+        { author: null },
+        { author: { $exists: false } },
+        { author: "" },
+        { author: { $not: { $type: "objectId" } } },
+      ],
+    });
+    console.log(
+      "Problematic books:",
+      JSON.stringify(problematicBooks, null, 2)
+    );
+
+    // Let's also look at all books and their author fields specifically
+    const allBooks = await Book.find({});
+    console.log(
+      "All books authors:",
+      allBooks.map((book) => ({
+        title: book.title,
+        authorField: book.author,
+        authorType: typeof book.author,
+      }))
+    );
+  } catch (error) {
+    console.error("Error:", error);
+  }
+}
+
+async function checkDatabase3() {
+  try {
+    // First, let's just see all books with minimal processing
+    const allBooks = await Book.find({});
+    console.log("All books:");
+    allBooks.forEach((book) => {
+      console.log({
+        title: book.title,
+        authorId: book.author,
+        hasAuthor: !!book.author,
+      });
+    });
+
+    // Now let's try to find problematic entries without casting
+    const problematicBooks = await Book.find({
+      $or: [{ author: { $exists: false } }, { author: null }],
+    }).lean(); // lean() returns plain JavaScript objects
+
+    console.log("\nProblematic books:", problematicBooks);
+
+    // Let's also try to update the problematic entries
+    if (problematicBooks.length > 0) {
+      console.log(
+        "\nFound problematic books. Would you like me to provide the update query to fix them?"
+      );
+    }
+  } catch (error) {
+    console.error("Database check error:", error.message);
+  }
+}
+
+async function checkAuthorsExistence() {
+  try {
+    // Get all books
+    const books = await Book.find({});
+
+    console.log("\nChecking author existence for each book:");
+    for (const book of books) {
+      const author = await Author.findById(book.author);
+      console.log({
+        bookTitle: book.title,
+        authorId: book.author,
+        authorExists: !!author,
+        authorData: author,
+      });
+    }
+
+    // Also list all authors in the database
+    const allAuthors = await Author.find({});
+    console.log("\nAll authors in database:", allAuthors);
+  } catch (error) {
+    console.error("Check error:", error.message);
+  }
+}
+
+async function fixBooks() {
+  try {
+    // First create a default author if needed
+    const defaultAuthor = await Author.findOne({});
+    if (!defaultAuthor) {
+      console.log("No authors found in database");
+      return;
+    }
+    await Book.deleteMany({ title: "NoSQL Distilled 2" });
+
+    // Update books with missing/invalid authors
+    const result = await Book.updateMany(
+      { $or: [{ author: { $exists: false } }, { author: null }] },
+      { $set: { author: defaultAuthor._id } }
+    );
+
+    console.log(`Updated ${result.modifiedCount} books`);
+  } catch (error) {
+    console.error("Fix error:", error.message);
+  }
+}
 
 const typeDefs = `
 type User {
@@ -71,6 +209,7 @@ enum YesNo {
     bookCount: Int!
     authorCount: Int!
     allBooks(author: String, genre: String): [Book!]!
+    filteredBooks(genre: String!): [Book!]!
     allAuthors: [Author!]!
     allPersons(phone: YesNo): [Person!]!
     findPerson(name: String!): Person
@@ -116,7 +255,13 @@ const resolvers = {
     bookCount: async () => Book.collection.countDocuments(),
     authorCount: async () => Author.collection.countDocuments(),
     allBooks: async (root, args) => {
-      return Book.find({});
+      return Book.find({}).populate("author");
+    },
+    filteredBooks: async (root, args, context) => {
+      const genre = args.genre;
+      console.log(genre);
+
+      return Book.find({ genres: { $in: [genre] } }).populate("author");
     },
     allAuthors: async () => {
       return Author.find({});
@@ -143,8 +288,11 @@ const resolvers = {
     },
   },
   Author: {
-    booksByAuthor: (root) => {
-      return Book.find({ author: root.name });
+    booksByAuthor: async (root) => {
+      //  const author = { name: root.author.name, born: root.author.born };
+      //console.log("rootauthor", root._id);
+
+      return Book.countDocuments({ author: root._id });
     },
   },
   //   Book: {
@@ -202,6 +350,7 @@ const resolvers = {
     },
     addBook: async (root, args, context) => {
       const currentUser = context.currentUser;
+      console.log(currentUser);
 
       if (!currentUser) {
         throw new GraphQLError("not authenticated", {
@@ -212,6 +361,7 @@ const resolvers = {
       }
 
       let author = await Author.findOne({ name: args.author });
+      console.log(author);
 
       // If author doesn't exist, create new one
       if (!author) {
@@ -222,6 +372,8 @@ const resolvers = {
         try {
           author = await author.save();
         } catch (error) {
+          console.log(error);
+
           throw new GraphQLError("Saving author failed", {
             extensions: {
               code: "BAD_USER_INPUT",
@@ -233,6 +385,8 @@ const resolvers = {
       }
       //  const author = new Author({ name: args.author, born: 0 });
       const book = new Book({ ...args, author: author._id });
+      console.log(book);
+
       try {
         await book.save();
         // Populate the author details before returning
@@ -268,6 +422,8 @@ const resolvers = {
       try {
         await author.save();
       } catch (error) {
+        console.log(error);
+
         throw new GraphQLError("editing author failed", {
           extensions: {
             code: "BAD_USER_INPUT",
@@ -285,6 +441,8 @@ const resolvers = {
       });
 
       return user.save().catch((error) => {
+        console.log(error);
+
         throw new GraphQLError("Creating the user failed", {
           extensions: {
             code: "BAD_USER_INPUT",
@@ -358,4 +516,5 @@ startStandaloneServer(server, {
   },
 }).then(({ url }) => {
   console.log(`Server ready at ${url}`);
+  // checkDatabase3();
 });
